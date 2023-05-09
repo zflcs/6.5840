@@ -18,13 +18,13 @@ package raft
 //
 
 import (
-	//	"bytes"
+	"bytes"
 	"math/rand"
 	"sync"
 	"sync/atomic"
 	"time"
 
-	//	"6.5840/labgob"
+	"6.5840/labgob"
 	"6.5840/labrpc"
 )
 
@@ -65,8 +65,9 @@ type Raft struct {
 	// Look at the paper's Figure 2 for a description of what
 	// state a Raft server must maintain.
 	applych chan ApplyMsg
-	electorTimer *time.Timer			// 选举超时定时器
-	heartbeatTimer *time.Timer			// leader 心跳定时器
+	electorTriggle time.Time					// 选举超时触发数值
+	// electorTimer *time.Timer			// 选举超时定时器
+	// heartbeatTimer *time.Timer			// leader 心跳定时器
 	commitCond sync.Cond				// commit 条件变量
 	applyCond sync.Cond					// apply 条件变量
 
@@ -116,12 +117,13 @@ func (rf *Raft) GetState() (int, bool) {
 func (rf *Raft) persist() {
 	// Your code here (2C).
 	// Example:
-	// w := new(bytes.Buffer)
-	// e := labgob.NewEncoder(w)
-	// e.Encode(rf.xxx)
-	// e.Encode(rf.yyy)
-	// raftstate := w.Bytes()
-	// rf.persister.Save(raftstate, nil)
+	w := new(bytes.Buffer)
+	e := labgob.NewEncoder(w)
+	e.Encode(rf.currentTerm)
+	e.Encode(rf.votedFor)
+	e.Encode(rf.log)
+	raftstate := w.Bytes()
+	rf.persister.Save(raftstate, nil)
 }
 
 
@@ -132,17 +134,21 @@ func (rf *Raft) readPersist(data []byte) {
 	}
 	// Your code here (2C).
 	// Example:
-	// r := bytes.NewBuffer(data)
-	// d := labgob.NewDecoder(r)
-	// var xxx
-	// var yyy
-	// if d.Decode(&xxx) != nil ||
-	//    d.Decode(&yyy) != nil {
-	//   error...
-	// } else {
-	//   rf.xxx = xxx
-	//   rf.yyy = yyy
-	// }
+	r := bytes.NewBuffer(data)
+	d := labgob.NewDecoder(r)
+	var currentTerm int
+	var votedFor int
+	var log []LogEntry
+	if d.Decode(&currentTerm) != nil || d.Decode(&votedFor) != nil || d.Decode(&log) != nil {
+		Debug(dError, "S%d decode error", rf.me)	
+		return
+	} else {
+		rf.mu.Lock()
+	  	rf.currentTerm = currentTerm
+	  	rf.votedFor = votedFor
+	  	rf.log = log
+		rf.mu.Unlock()
+	}
 }
 
 
@@ -196,6 +202,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// Your code here (2A, 2B).
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
+	defer rf.persist()
 	if args.Term < rf.currentTerm {
 		reply.Term = rf.currentTerm
 		reply.VoteGranted = false
@@ -212,8 +219,6 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		rf.state = Follower
 		rf.currentTerm = args.Term
 		rf.votedFor = -1
-		// 状态改变之后，需要重置定时器
-		rf.setElectorTimer()
 	}
 	// TODO: 检查 log 是否足够新
 	lastLogIndex, lastLogTerm := rf.lastLog()
@@ -234,6 +239,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	// Your code here (2A, 2B).
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
+	defer rf.persist()
 	if args.Term < rf.currentTerm {
 		reply.Term = rf.currentTerm
 		reply.Success = false
@@ -375,6 +381,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 		rf.matchIndex[rf.me] = len(rf.log)-1
 		rf.nextIndex[rf.me] = len(rf.log)
 		Debug(dClient, "L%d received a request", rf.me)
+		rf.persist()
 	}
 	rf.mu.Unlock()
 	return index, term, isLeader
@@ -400,39 +407,9 @@ func (rf *Raft) killed() bool {
 }
 
 func (rf *Raft) setElectorTimer() {
-	if !rf.electorTimer.Stop() {	// 关闭选举定时器
-		select {
-		case <-rf.electorTimer.C: // try to drain the channel
-		default:
-		}
-	}
-	if !rf.heartbeatTimer.Stop() {
-		select {
-		case <-rf.heartbeatTimer.C: // try to drain the channel
-		default:
-		}
-	}
 	// rf.electorTimer.Stop()
-	ms := 100 + (rand.Int63() % 200)
-	rf.electorTimer.Reset(time.Duration(ms) * time.Millisecond)
-}
-
-func (rf *Raft) setHeartBeatTimer() {
-	if !rf.electorTimer.Stop() {	// 关闭选举定时器
-		select {
-		case <-rf.electorTimer.C: // try to drain the channel
-		default:
-		}
-	}
-	if !rf.heartbeatTimer.Stop() {
-		select {
-		case <-rf.heartbeatTimer.C: // try to drain the channel
-		default:
-		}
-	}
-	// rf.electorTimer.Stop() // 关闭选举定时器
-	// rf.heartbeatTimer.Stop()
-	rf.heartbeatTimer.Reset(time.Duration(50) * time.Millisecond)
+	ms := 150 + (rand.Int63() % 150)
+	rf.electorTriggle = time.Now().Add(time.Duration(ms) * time.Millisecond)
 }
 
 // 获取 raft 最后一个日志的索引和 term，log 中第 0 个位置被占位
@@ -443,12 +420,14 @@ func (rf *Raft) lastLog() (int, int) {
 
 func (rf *Raft) prevLog(peer int) (int, int) {
 	nextIndex := rf.nextIndex[peer]
-	prevEntry := rf.log[nextIndex-1]
-	return prevEntry.Index, prevEntry.Term
+	if nextIndex > 0 {
+		prevEntry := rf.log[nextIndex-1]
+		return prevEntry.Index, prevEntry.Term
+	}
+	return 0, 0
 }
 
 func (rf *Raft) sendHeart() {
-	rf.setHeartBeatTimer()
 	term := rf.currentTerm
 	leaderId := rf.me
 	leaderCommit := rf.commitIndex
@@ -486,7 +465,7 @@ func (rf *Raft) sendHeart() {
 								rf.state = Follower
 								rf.votedFor = -1
 								rf.currentTerm = reply.Term
-								rf.setElectorTimer()
+								rf.persist()
 								Debug(dInfo, "S%d from Leader turn to Follower, reply T%d is large", rf.me, reply.Term)
 							} else if reply.XTerm == -1 {	// 失败的情况，需要将 nextIndex - 1
 								rf.nextIndex[peer] = reply.XLen
@@ -514,9 +493,6 @@ func (rf *Raft) sendHeart() {
 }
 
 func (rf *Raft) newElection() {
-	// if rf.state == Leader {
-	// 	panic("raft state is error")
-	// }
 	rf.setElectorTimer()
 	rf.state = Candidate
 	rf.currentTerm += 1
@@ -532,13 +508,17 @@ func (rf *Raft) newElection() {
 		LastLogIndex: lastLogIndex,
 		LastLogTerm: lastLogTerm,
 	}
+	rf.persist()
 	for server := range rf.peers {
 		if server != rf.me {
 			go func(id int){
 				// 如果候选者已经成功当选或者转为 Follower，则不会继续发送 RPC
+				rf.mu.Lock()
 				if rf.state != Candidate {	
+					rf.mu.Unlock()
 					return
 				}
+				rf.mu.Unlock()
 				reply := RequestVoteReply{}
 				if rf.sendRequestVote(id, &args, &reply) {
 					rf.mu.Lock()
@@ -561,7 +541,7 @@ func (rf *Raft) newElection() {
 							rf.state = Follower
 							rf.currentTerm = reply.Term
 							rf.votedFor = -1
-							rf.setElectorTimer()
+							rf.persist()
 							Debug(dInfo, "S%d from Candidate turn to Follower, reply T%d is large", rf.me, reply.Term)
 						}
 					}
@@ -577,18 +557,14 @@ func (rf *Raft) ticker() {
 
 		// Your code here (2A)
 		// Check if a leader election should be started.
-		select {
-		case <- rf.electorTimer.C:
-			rf.mu.Lock()
+		rf.mu.Lock()
+		if rf.state != Leader && time.Now().After(rf.electorTriggle) {
 			rf.newElection()
-			rf.mu.Unlock()
-		case <- rf.heartbeatTimer.C:
-			rf.mu.Lock()
-			if rf.state == Leader {
-				rf.sendHeart()
-			}
-			rf.mu.Unlock()
+		} else if rf.state == Leader {
+			rf.sendHeart()
 		}
+		rf.mu.Unlock()
+		time.Sleep(time.Duration(60) * time.Millisecond)
 	}
 }
 
@@ -672,10 +648,8 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.mu = sync.Mutex{}
 	rf.mu.Lock()
 	rf.applych = applyCh
-	rf.electorTimer = time.NewTimer(time.Duration(10) * time.Millisecond)
-	rf.heartbeatTimer = time.NewTimer(time.Duration(10) * time.Millisecond)
+	rf.electorTriggle = time.Now()
 	rf.setElectorTimer()
-	rf.heartbeatTimer.Stop()
 	rf.state = Follower
 	rf.currentTerm = 0
 	rf.votedFor = -1
