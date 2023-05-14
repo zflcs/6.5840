@@ -66,8 +66,6 @@ type Raft struct {
 	// state a Raft server must maintain.
 	applych chan ApplyMsg
 	electorTriggle time.Time					// 选举超时触发数值
-	// electorTimer *time.Timer			// 选举超时定时器
-	// heartbeatTimer *time.Timer			// leader 心跳定时器
 	commitCond sync.Cond				// commit 条件变量
 	applyCond sync.Cond					// apply 条件变量
 
@@ -159,6 +157,36 @@ func (rf *Raft) readPersist(data []byte) {
 func (rf *Raft) Snapshot(index int, snapshot []byte) {
 	// Your code here (2D).
 
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	offsetIndex, _ := rf.offset() 
+	if index <= offsetIndex || index > rf.commitIndex {
+		return
+	}
+	Debug(dSnap, "S%d snapshot %d", rf.me, index)
+	position := 1
+	for idx, entry := range rf.log {
+		if idx != 0 {	// 跳过 snapshot 日志
+			position += 1
+			rf.setOffset(entry.Index, entry.Term)
+			if entry.Index == index {
+				break
+			}
+		}
+	}
+	newLog := []LogEntry{}
+	newLog = append(newLog, rf.log[0])
+	newLog = append(newLog, rf.log[position:]...)
+	rf.log = newLog
+
+	w := new(bytes.Buffer)
+	e := labgob.NewEncoder(w)
+	e.Encode(rf.votedFor)
+	e.Encode(rf.currentTerm)
+	e.Encode(rf.log)
+	raftstate := w.Bytes()
+	Debug(dSnap, "S%d log len %d", rf.me, len(rf.log))
+	rf.persister.Save(raftstate, snapshot)
 }
 
 
@@ -256,17 +284,18 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	rf.state = Follower
 	rf.setElectorTimer()
 	// TODO: 检查 log 是否能够匹配，不能直接截断 log，二是应该继续递减 nextIndex
-	if args.PrevLogIndex >= len(rf.log) || rf.log[args.PrevLogIndex].Term != args.PrevLogTerm {
-		xLen := len(rf.log)
+	offsetIndex, _ := rf.offset()
+	if args.PrevLogIndex - offsetIndex >= len(rf.log) || rf.log[args.PrevLogIndex - offsetIndex].Term != args.PrevLogTerm {
+		xLen := len(rf.log) + offsetIndex
 		xIndex := -1
 		xTerm := -1
-		if args.PrevLogIndex < len(rf.log) {
+		if args.PrevLogIndex - offsetIndex < len(rf.log) {
 			Debug(dDrop, "S%d's log exist conflict at %d-%d", rf.me, args.PrevLogIndex, len(rf.log))
 			// rf.log = rf.log[: args.PrevLogIndex]
 			// 找到冲突的 term 的第一个 log
 			xIndex = args.PrevLogIndex
-			xTerm = rf.log[args.PrevLogIndex].Term
-			for idx := args.PrevLogIndex; idx >= 0; idx-- {
+			xTerm = rf.log[args.PrevLogIndex - offsetIndex].Term
+			for idx := args.PrevLogIndex - offsetIndex; idx >= 0; idx-- {
 				if rf.log[idx].Term != xTerm {
 					break
 				}
@@ -278,33 +307,36 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		reply.XLen = xLen
 		reply.Term = rf.currentTerm
 		reply.Success = false
-		Debug(dDrop, "S%d's log exist conflict", rf.me)
+		Debug(dDrop, "S%d's log exist conflict, prevLogIndex:%d prevLogTerm:%d, log len:%d", rf.me, args.PrevLogIndex, args.PrevLogTerm, len(rf.log))
 		return
 	}
 	// TODO: 剔除冲突的日志，因为之前冲突时，日志没有变化，所以在 args.PrevLogIndex 之后的日志都存在问题
-	for i, entry := range args.Entries {
-		index := args.PrevLogIndex + i + 1
-		if index > rf.log[len(rf.log)-1].Index {
+	for _, entry := range args.Entries {
+		index := entry.Index
+		lastIndex, _ := rf.lastLog()
+		if index > lastIndex {
 		   rf.log = append(rf.log, entry)
 		} else if index <= rf.log[0].Index {
 		   //当追加的日志处于快照部分,那么直接跳过不处理该日志
 		   continue
 		} else {
-		   if rf.log[index].Term != entry.Term {
-			  rf.log = rf.log[:index] // 删除当前以及后续所有log
+		   if rf.log[index - offsetIndex].Term != entry.Term {
+			  rf.log = rf.log[:index - offsetIndex] // 删除当前以及后续所有log
 			  rf.log = append(rf.log, entry)                      
 		   }
 		}
-	 }
-  
-	// rf.log = append(rf.log[: args.PrevLogIndex+1], args.Entries...)
-	if args.LeaderCommit > rf.commitIndex {
-		rf.commitIndex = args.LeaderCommit
-		if len(rf.log)-1 < rf.commitIndex {
-			rf.commitIndex = len(rf.log)-1
-		}
+	}
+	lastLogIndex, _ := rf.lastLog()
+	commitIndex := 0
+	if lastLogIndex < args.LeaderCommit {
+		commitIndex = lastLogIndex
+	} else {
+		commitIndex = args.LeaderCommit
+	}
+	if commitIndex > rf.commitIndex {
+		rf.commitIndex = commitIndex
 		rf.applyCond.Signal()
-	  }
+	}
 	reply.Success = true
 	reply.Term = rf.currentTerm
 	rf.setElectorTimer()
@@ -372,15 +404,16 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	if rf.state == Leader {
 		isLeader = true
 		term = rf.currentTerm
-		index = len(rf.log)
+		offsetIndex, _ := rf.offset()
+		index = len(rf.log) + offsetIndex
 		rf.log = append(rf.log, LogEntry{
 			Term: term,
 			Index: index,
 			Command: command,
 		})
-		rf.matchIndex[rf.me] = len(rf.log)-1
-		rf.nextIndex[rf.me] = len(rf.log)
-		Debug(dClient, "L%d received a request", rf.me)
+		rf.matchIndex[rf.me] = index
+		rf.nextIndex[rf.me] = index + 1
+		Debug(dClient, "L%d received a request, term:%d, index:%d", rf.me, term, index)
 		rf.persist()
 	}
 	rf.mu.Unlock()
@@ -411,6 +444,17 @@ func (rf *Raft) setElectorTimer() {
 	ms := 150 + (rand.Int63() % 150)
 	rf.electorTriggle = time.Now().Add(time.Duration(ms) * time.Millisecond)
 }
+// 获取日志偏移
+func (rf *Raft) offset() (int, int) {
+	snapEntry := rf.log[0]
+	return snapEntry.Index, snapEntry.Term
+}
+
+// 设置日志下标偏移
+func (rf *Raft) setOffset(index int, term int) {
+	rf.log[0].Index = index
+	rf.log[0].Term = term
+}
 
 // 获取 raft 最后一个日志的索引和 term，log 中第 0 个位置被占位
 func (rf *Raft) lastLog() (int, int) {
@@ -420,11 +464,16 @@ func (rf *Raft) lastLog() (int, int) {
 
 func (rf *Raft) prevLog(peer int) (int, int) {
 	nextIndex := rf.nextIndex[peer]
-	if nextIndex > 0 {
-		prevEntry := rf.log[nextIndex-1]
+	offsetIndex, offsetTerm := rf.offset()
+	if nextIndex > offsetIndex && nextIndex <= len(rf.log) + offsetIndex {
+		prevEntry := rf.log[nextIndex - 1 - offsetIndex]
+		return prevEntry.Index, prevEntry.Term
+	} else if nextIndex > len(rf.log) + offsetIndex {
+		rf.nextIndex[peer] = len(rf.log) + offsetIndex
+		prevEntry := rf.log[len(rf.log) - 1]
 		return prevEntry.Index, prevEntry.Term
 	}
-	return 0, 0
+	return offsetIndex, offsetTerm
 }
 
 func (rf *Raft) sendHeart() {
@@ -443,7 +492,8 @@ func (rf *Raft) sendHeart() {
 				}
 				prevLogIndex, prevLogTerm := rf.prevLog(peer)
 				nextIdx := rf.nextIndex[peer]
-				sendEntries := rf.log[nextIdx:]
+				offsetIndex, _ := rf.offset()
+				sendEntries := rf.log[nextIdx - offsetIndex:]
 				rf.mu.Unlock()
 				args := AppendEntriesArgs{
 					Term: term,
@@ -459,7 +509,7 @@ func (rf *Raft) sendHeart() {
 					if rf.currentTerm == term && rf.state == Leader {
 						if reply.Success {	// 返回成功暂时不进行处理
 							rf.matchIndex[peer] = args.PrevLogIndex + len(args.Entries)
-							rf.nextIndex[peer] = rf.matchIndex[peer]+1
+							rf.nextIndex[peer] = rf.matchIndex[peer] + 1
 						} else {
 							if reply.Term > rf.currentTerm {
 								rf.state = Follower
@@ -529,9 +579,10 @@ func (rf *Raft) newElection() {
 							votedNum += 1
 							if votedNum > len(rf.peers) / 2 {
 								rf.state = Leader
+								offsetIndex, _ := rf.offset()
 								for idx := range rf.peers {
 									rf.matchIndex[idx] = 0
-									rf.nextIndex[idx] = len(rf.log)
+									rf.nextIndex[idx] = len(rf.log) + offsetIndex
 								}
 								// 发送心跳包
 								rf.sendHeart()
@@ -576,17 +627,18 @@ func (rf *Raft) commit() {	// leader 更新 commitIndex，如果不是 leader �
 		}
 		// TODO: 依次检查 commitIndex 之后的日志是否能被 commit
 		flag := false
-		for i := rf.commitIndex + 1; i < len(rf.log); i++ {
+		offsetIndex, _ := rf.offset()
+		for i := rf.commitIndex + 1 - offsetIndex; i < len(rf.log); i++ {
 			if rf.log[i].Term == rf.currentTerm {
 				count := 0
 				for idx := range rf.matchIndex {
-					if rf.matchIndex[idx] >= i {
+					if rf.matchIndex[idx] >= i + offsetIndex {
 						count += 1
 					}
 				}
 				if count > len(rf.peers) / 2 {	// 超过半数 server 备份，则 commit
 					flag = true
-					rf.commitIndex = i
+					rf.commitIndex = i + offsetIndex
 					Debug(dCommit, "L%d commit Entry %v at T%d, commitIndex: %d", rf.me, rf.log[i], rf.currentTerm, rf.commitIndex)
 				}
 			}
@@ -606,8 +658,9 @@ func (rf *Raft) apply() {	// server 应用到状态机中
 			rf.applyCond.Wait()	
 		}
 		lastApplied, commitIndex := rf.lastApplied, rf.commitIndex
+		offsetIndex, _ := rf.offset()
 		Debug(dInfo, "S%d applies entries %d-%d in T%d", rf.me, lastApplied + 1, commitIndex + 1, rf.currentTerm)
-		entries := rf.log[lastApplied+1 : commitIndex+1]
+		entries := rf.log[lastApplied+1-offsetIndex : commitIndex+1-offsetIndex]
 		rf.applyCond.L.Unlock()
 		for _, entry := range entries {
 			rf.applych <- ApplyMsg{
@@ -654,7 +707,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.currentTerm = 0
 	rf.votedFor = -1
 	rf.log = make([]LogEntry, 1)
-	// rf.log = append(rf.log, LogEntry{})
+	rf.setOffset(0, 0)
 	rf.commitIndex = 0
 	rf.lastApplied = 0
 	rf.nextIndex = make([]int, 10)
