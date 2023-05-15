@@ -157,7 +157,6 @@ func (rf *Raft) readPersist(data []byte) {
 // that index. Raft should now trim its log as much as possible.
 func (rf *Raft) Snapshot(index int, snapshot []byte) {
 	// Your code here (2D).
-
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 	offsetIndex, _ := rf.offset() 
@@ -378,15 +377,15 @@ func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapsho
 		rf.currentTerm = args.Term
 		rf.votedFor = -1
 		rf.state = Follower
-		rf.persist()
 		Debug(dInfo, "S%d turn to follower, args term:%d is large", rf.me, args.Term)
 	}
+	rf.state = Follower
+	rf.setElectorTimer()
+	rf.persist()
 	offsetIndex, _ := rf.offset()
 	if args.LastIncludedIndex <= offsetIndex {
 		return
 	}
-	rf.state = Follower
-	rf.setElectorTimer()
 	newLog := make([]LogEntry, 1)
 	lastLogIndex, _ := rf.lastLog()
 	for i := args.LastIncludedIndex + 1; i <= lastLogIndex; i++ {
@@ -407,7 +406,7 @@ func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapsho
 	e.Encode(rf.currentTerm)
 	e.Encode(rf.log)
 	raftstate := w.Bytes()
-	rf.persister.Save(raftstate, args.Data)
+	rf.persister.Save(raftstate, rf.snapshot)
 }
 
 // example code to send a RequestVote RPC to a server.
@@ -555,29 +554,28 @@ func (rf *Raft) sendHeart() {
 	leaderCommit := rf.commitIndex
 	for server := range rf.peers {
 		if server != rf.me {
-			go func (peer int)  {
-				// 不需要循环到发送成功
-				rf.mu.Lock()
-				if rf.state != Leader {
-					rf.mu.Unlock()
-					return
+			prevLogIndex, prevLogTerm := rf.prevLog(server)
+			nextIdx := rf.nextIndex[server]
+			offsetIndex, offsetTerm := rf.offset()
+			if nextIdx > offsetIndex {		// 发送日志
+				Debug(dTerm, "L%d send AppendEntries at T%d", rf.me, term)
+				sendEntries := rf.log[nextIdx - offsetIndex:]
+				args := AppendEntriesArgs{
+					Term: term,
+					LeaderId: leaderId,
+					PrevLogIndex: prevLogIndex,
+					PrevLogTerm: prevLogTerm,
+					Entries: sendEntries,
+					LeaderCommit: leaderCommit,
 				}
-				prevLogIndex, prevLogTerm := rf.prevLog(peer)
-				nextIdx := rf.nextIndex[peer]
-				offsetIndex, offsetTerm := rf.offset()
-				if nextIdx > offsetIndex {		// 发送日志
-					Debug(dTerm, "L%d send AppendEntries at T%d", rf.me, term)
-					sendEntries := rf.log[nextIdx - offsetIndex:]
-					rf.mu.Unlock()
-					args := AppendEntriesArgs{
-						Term: term,
-						LeaderId: leaderId,
-						PrevLogIndex: prevLogIndex,
-						PrevLogTerm: prevLogTerm,
-						Entries: sendEntries,
-						LeaderCommit: leaderCommit,
+				reply := AppendEntriesReply{}
+				go func(peer int, args AppendEntriesArgs, reply AppendEntriesReply) {
+					rf.mu.Lock()
+					if rf.state != Leader {
+						rf.mu.Unlock()
+						return
 					}
-					reply := AppendEntriesReply{}
+					rf.mu.Unlock()
 					if rf.sendAppendEntries(peer, &args, &reply) {
 						rf.mu.Lock()
 						if rf.currentTerm == term && rf.state == Leader {
@@ -610,40 +608,42 @@ func (rf *Raft) sendHeart() {
 						}
 						rf.mu.Unlock()
 					}
-				} else {
-					// TODO: SendSnapshot
-					Debug(dSnap, "L%d send snapshot to %d, index:%d, term:%d", rf.me, peer, offsetIndex, offsetTerm)
-					// args := InstallSnapshotArgs{	// 每次直接发送全部的 snapshot 文件
-					// 	Term: term,
-					// 	LeaderId: leaderId,
-					// 	LastIncludedIndex: offsetIndex,
-					// 	LastIncludedTerm: offsetTerm,
-					// 	Offset: 0,
-					// 	Data: rf.snapshot,
-					// 	Done: true,
-					// }
-					// reply := InstallSnapshotReply{}
-					rf.mu.Unlock()
-					// if rf.sendInstallSnapshot(peer, &args, &reply) {
-					// 	rf.mu.Lock()
-					// 	if reply.Term > rf.currentTerm {
-					// 		rf.currentTerm = reply.Term
-					// 		rf.state = Follower
-					// 		rf.votedFor = -1
-					// 		rf.persist()
-					// 		Debug(dInfo, "S%d from Leader turn to Follower, InstallSnapshot reply T%d is large", rf.me, reply.Term)
-					// 	} else {
-					// 		if rf.matchIndex[peer] < args.LastIncludedIndex {
-					// 			rf.matchIndex[peer] = args.LastIncludedIndex
-					// 		}
-					// 		if rf.nextIndex[peer] < args.LastIncludedIndex + 1 {
-					// 			rf.nextIndex[peer] = args.LastIncludedIndex + 1
-					// 		}
-					// 	}
-					// 	rf.mu.Unlock()
-					// }
+				}(server, args, reply)
+			} else {		// 发送快照
+				Debug(dSnap, "L%d send snapshot to %d, index:%d, term:%d", rf.me, server, offsetIndex, offsetTerm)
+				args := InstallSnapshotArgs{	// 每次直接发送全部的 snapshot 文件
+					Term: term,
+					LeaderId: leaderId,
+					LastIncludedIndex: offsetIndex,
+					LastIncludedTerm: offsetTerm,
+					Offset: 0,
+					Data: rf.snapshot,
+					Done: true,
 				}
-			}(server)
+				reply := InstallSnapshotReply{}
+				go func (peer int, args InstallSnapshotArgs, reply InstallSnapshotReply)  {
+					if rf.sendInstallSnapshot(peer, &args, &reply) {
+						rf.mu.Lock()
+						if rf.currentTerm == term && rf.state == Leader {
+							if reply.Term > rf.currentTerm {
+								rf.currentTerm = reply.Term
+								rf.state = Follower
+								rf.votedFor = -1
+								rf.persist()
+								Debug(dInfo, "S%d from Leader turn to Follower, InstallSnapshot reply T%d is large", rf.me, reply.Term)
+							} else {
+								if rf.matchIndex[peer] < args.LastIncludedIndex {
+									rf.matchIndex[peer] = args.LastIncludedIndex
+								}
+								if rf.nextIndex[peer] < args.LastIncludedIndex + 1 {
+									rf.nextIndex[peer] = args.LastIncludedIndex + 1
+								}
+							}
+						}
+						rf.mu.Unlock()
+					}
+				}(server, args, reply)	
+			}
 		}
 	}
 }
@@ -767,15 +767,16 @@ func (rf *Raft) apply() {	// server 应用到状态机中
 		offsetIndex, offsetTerm := rf.offset()
 		if lastApplied < offsetIndex {
 			Debug(dInfo, "S%d applies snapshot index:%d term:%d in T%d", rf.me, offsetIndex, offsetTerm, rf.currentTerm)
+			rf.applyCond.L.Unlock()
 			rf.applych <- ApplyMsg{
 				CommandValid: false,
 				Snapshot:      rf.snapshot,
 				SnapshotValid: true,
-				SnapshotTerm:  offsetIndex,
-				SnapshotIndex: offsetTerm,
+				SnapshotTerm:  offsetTerm,
+				SnapshotIndex: offsetIndex,
 			}
 			rf.mu.Lock()
-			if offsetIndex > rf.lastApplied {
+			if offsetIndex > rf.lastApplied && lastApplied == rf.lastApplied {
 				rf.lastApplied = offsetIndex
 			}
 			rf.mu.Unlock()
