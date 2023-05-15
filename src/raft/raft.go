@@ -320,7 +320,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 				if rf.log[idx].Term != xTerm {
 					break
 				}
-				xIndex -= 1
+				xIndex = rf.log[idx].Index
 			}
 		}
 		reply.XIndex = xIndex
@@ -593,9 +593,9 @@ func (rf *Raft) sendHeart() {
 									rf.nextIndex[peer] = reply.XLen
 								} else if reply.XTerm != -1 {
 									nextIndex := -1
-									for i := 0; i < len(rf.log); i++ {
+									for i := 1; i < len(rf.log); i++ {
 										if rf.log[i].Term == reply.XTerm {
-											nextIndex = i
+											nextIndex = rf.log[i].Index
 										}
 									}
 									if nextIndex != -1 {
@@ -734,24 +734,27 @@ func (rf *Raft) commit() {	// leader 更新 commitIndex，如果不是 leader �
 		// TODO: 依次检查 commitIndex 之后的日志是否能被 commit
 		flag := false
 		offsetIndex, _ := rf.offset()
-		for i := rf.commitIndex + 1 - offsetIndex; i < len(rf.log); i++ {
-			if rf.log[i].Term == rf.currentTerm {
-				count := 0
-				for idx := range rf.matchIndex {
-					if rf.matchIndex[idx] >= i + offsetIndex {
-						count += 1
+		if rf.commitIndex + 1 > offsetIndex {
+			for i := rf.commitIndex + 1 - offsetIndex; i < len(rf.log); i++ {
+				if rf.log[i].Term == rf.currentTerm {
+					count := 0
+					for idx := range rf.matchIndex {
+						if rf.matchIndex[idx] >= i + offsetIndex {
+							count += 1
+						}
+					}
+					if count > len(rf.peers) / 2 {	// 超过半数 server 备份，则 commit
+						flag = true
+						rf.commitIndex = i + offsetIndex
+						Debug(dCommit, "L%d commit Entry %v at T%d, commitIndex: %d", rf.me, rf.log[i], rf.currentTerm, rf.commitIndex)
 					}
 				}
-				if count > len(rf.peers) / 2 {	// 超过半数 server 备份，则 commit
-					flag = true
-					rf.commitIndex = i + offsetIndex
-					Debug(dCommit, "L%d commit Entry %v at T%d, commitIndex: %d", rf.me, rf.log[i], rf.currentTerm, rf.commitIndex)
-				}
+			}
+			if flag {
+				rf.applyCond.Signal()
 			}
 		}
-		if flag {
-			rf.applyCond.Signal()
-		}
+		
 		rf.commitCond.L.Unlock()
 		time.Sleep(time.Duration(20) * time.Millisecond)
 	}
@@ -843,6 +846,9 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.mu.Unlock()
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
+	offsetIndex, _ := rf.offset()
+	rf.commitIndex = offsetIndex
+	rf.lastApplied = offsetIndex
 
 	// start ticker goroutine to start elections
 	go rf.ticker()
