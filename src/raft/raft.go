@@ -81,6 +81,7 @@ type Raft struct {
 	matchIndex []int
 
 	snapshot []byte			// 快照
+	leaderId int
 }
 
 type LogEntry struct {
@@ -262,6 +263,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		rf.state = Follower
 		rf.currentTerm = args.Term
 		rf.votedFor = -1
+		rf.leaderId = -1
 	}
 	// TODO: 检查 log 是否足够新
 	lastLogIndex, lastLogTerm := rf.lastLog()
@@ -295,9 +297,11 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	if args.Term > rf.currentTerm {
 		rf.currentTerm = args.Term
 		rf.votedFor = -1
+		rf.leaderId = -1
 	}
 	rf.state = Follower
 	rf.setElectorTimer()
+	rf.leaderId = args.LeaderId
 	// TODO: 检查 log 是否能够匹配，不能直接截断 log，二是应该继续递减 nextIndex
 	offsetIndex, _ := rf.offset()
 	if args.PrevLogIndex < offsetIndex {
@@ -376,11 +380,12 @@ func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapsho
 	if args.Term > rf.currentTerm {
 		rf.currentTerm = args.Term
 		rf.votedFor = -1
-		rf.state = Follower
+		rf.leaderId = -1
 		Debug(dInfo, "S%d turn to follower, args term:%d is large", rf.me, args.Term)
 	}
 	rf.state = Follower
 	rf.setElectorTimer()
+	rf.leaderId = args.LeaderId
 	rf.persist()
 	offsetIndex, _ := rf.offset()
 	if args.LastIncludedIndex <= offsetIndex {
@@ -487,6 +492,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 		rf.nextIndex[rf.me] = index + 1
 		Debug(dClient, "L%d received a request, term:%d, index:%d", rf.me, term, index)
 		rf.persist()
+		rf.sendHeart()
 	}
 	rf.mu.Unlock()
 	return index, term, isLeader
@@ -587,6 +593,7 @@ func (rf *Raft) sendHeart() {
 									rf.state = Follower
 									rf.votedFor = -1
 									rf.currentTerm = reply.Term
+									rf.leaderId = -1
 									rf.persist()
 									Debug(dInfo, "S%d from Leader turn to Follower, AppendEntries reply T%d is large", rf.me, reply.Term)
 								} else if reply.XTerm == -1 {	// 失败的情况，需要将 nextIndex - 1
@@ -629,6 +636,7 @@ func (rf *Raft) sendHeart() {
 								rf.currentTerm = reply.Term
 								rf.state = Follower
 								rf.votedFor = -1
+								rf.leaderId = -1
 								rf.persist()
 								Debug(dInfo, "S%d from Leader turn to Follower, InstallSnapshot reply T%d is large", rf.me, reply.Term)
 							} else {
@@ -690,6 +698,7 @@ func (rf *Raft) newElection() {
 									rf.matchIndex[idx] = 0
 									rf.nextIndex[idx] = len(rf.log) + offsetIndex
 								}
+								rf.leaderId = rf.me
 								// 发送心跳包
 								rf.sendHeart()
 								rf.commitCond.Signal()	// 释放 commitCond 条件变量
@@ -698,6 +707,7 @@ func (rf *Raft) newElection() {
 							rf.state = Follower
 							rf.currentTerm = reply.Term
 							rf.votedFor = -1
+							rf.leaderId = -1
 							rf.persist()
 							Debug(dInfo, "S%d from Candidate turn to Follower, reply T%d is large", rf.me, reply.Term)
 						}
@@ -843,6 +853,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.commitCond = sync.Cond{L: &rf.mu}
 	rf.applyCond = sync.Cond{L: &rf.mu}
 	rf.snapshot = persister.ReadSnapshot()	
+	rf.leaderId = -1
 	rf.mu.Unlock()
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
