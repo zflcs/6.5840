@@ -558,7 +558,6 @@ func (rf *Raft) sendHeart() {
 			nextIdx := rf.nextIndex[server]
 			offsetIndex, offsetTerm := rf.offset()
 			if nextIdx > offsetIndex {		// 发送日志
-				Debug(dTerm, "L%d send AppendEntries at T%d", rf.me, term)
 				sendEntries := rf.log[nextIdx - offsetIndex:]
 				args := AppendEntriesArgs{
 					Term: term,
@@ -571,6 +570,7 @@ func (rf *Raft) sendHeart() {
 				reply := AppendEntriesReply{}
 				go func(peer int, args AppendEntriesArgs, reply AppendEntriesReply) {
 					rf.mu.Lock()
+					Debug(dTerm, "L%d send AppendEntries at T%d", rf.me, args.Term)
 					if rf.state != Leader {
 						rf.mu.Unlock()
 						return
@@ -610,7 +610,6 @@ func (rf *Raft) sendHeart() {
 					}
 				}(server, args, reply)
 			} else {		// 发送快照
-				Debug(dSnap, "L%d send snapshot to %d, index:%d, term:%d", rf.me, server, offsetIndex, offsetTerm)
 				args := InstallSnapshotArgs{	// 每次直接发送全部的 snapshot 文件
 					Term: term,
 					LeaderId: leaderId,
@@ -622,6 +621,7 @@ func (rf *Raft) sendHeart() {
 				}
 				reply := InstallSnapshotReply{}
 				go func (peer int, args InstallSnapshotArgs, reply InstallSnapshotReply)  {
+					Debug(dSnap, "L%d send snapshot to %d, index:%d, term:%d", rf.me, peer, args.LastIncludedIndex, args.LastIncludedTerm)
 					if rf.sendInstallSnapshot(peer, &args, &reply) {
 						rf.mu.Lock()
 						if rf.currentTerm == term && rf.state == Leader {

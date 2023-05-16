@@ -1,0 +1,68 @@
+Test (2B): RPC counts aren't too high ...
+003017 TERM C2 conduct a new election at T1
+003018 TERM C1 conduct a new election at T1
+003018 TERM C0 conduct a new election at T1
+003021 VOTE S0 reject voting to 2 at T1, has voted
+003021 VOTE S2 reject voting to 1 at T1, has voted
+003021 VOTE S1 reject voting to 2 at T1, has voted
+003022 VOTE S1 reject voting to 0 at T1, has voted
+003022 VOTE S2 reject voting to 0 at T1, has voted
+003023 VOTE S0 reject voting to 1 at T1, has voted
+006039 TERM C0 conduct a new election at T2
+006040 TERM C2 conduct a new election at T2
+006040 TERM C1 conduct a new election at T2
+006041 VOTE S2 reject voting to 0 at T2, has voted
+006041 VOTE S1 reject voting to 0 at T2, has voted
+006041 VOTE S2 reject voting to 1 at T2, has voted
+006041 VOTE S0 reject voting to 1 at T2, has voted
+006042 VOTE S0 reject voting to 2 at T2, has voted
+006042 VOTE S1 reject voting to 2 at T2, has voted
+009057 TERM C2 conduct a new election at T3
+009058 TERM C0 conduct a new election at T3
+009058 TERM C1 conduct a new election at T3
+009059 VOTE S0 reject voting to 2 at T3, has voted
+009059 VOTE S2 reject voting to 0 at T3, has voted
+009060 VOTE S1 reject voting to 2 at T3, has voted
+009061 VOTE S1 reject voting to 0 at T3, has voted
+009062 VOTE S0 reject voting to 1 at T3, has voted
+009062 VOTE S2 reject voting to 1 at T3, has voted
+010865 TERM C2 conduct a new election at T4
+010867 VOTE S1 agreed vote to 2 at T4
+010867 TERM L2 send AppendEntries at T4
+010868 VOTE S0 agreed vote to 2 at T4
+010869 TERM L2 send AppendEntries at T4
+010870 INFO S0 accept entries at T4
+010870 INFO S1 accept entries at T4
+011466 TERM L2 send AppendEntries at T4
+011468 TERM L2 send AppendEntries at T4
+011468 INFO S1 accept entries at T4
+011470 INFO S0 accept entries at T4
+012075 TERM L2 send AppendEntries at T4
+012076 INFO S1 accept entries at T4
+012076 TERM L2 send AppendEntries at T4
+012078 INFO S0 accept entries at T4
+012685 TERM L2 send AppendEntries at T4
+012686 TERM L2 send AppendEntries at T4
+012687 INFO S0 accept entries at T4
+012687 INFO S1 accept entries at T4
+013292 TERM L2 send AppendEntries at T4
+013292 TERM L2 send AppendEntries at T4
+013293 INFO S1 accept entries at T4
+013294 INFO S0 accept entries at T4
+013898 TERM L2 send AppendEntries at T4
+013898 TERM L2 send AppendEntries at T4
+013900 INFO S1 accept entries at T4
+013900 INFO S0 accept entries at T4
+014508 TERM L2 send AppendEntries at T4
+014508 TERM L2 send AppendEntries at T4
+014509 INFO S0 accept entries at T4
+014509 INFO S1 accept entries at T4
+015119 TERM L2 send AppendEntries at T4
+015120 INFO S1 accept entries at T4
+015120 TERM L2 send AppendEntries at T4
+015121 INFO S0 accept entries at T4
+--- FAIL: TestCount2B (1.56s)
+    test_test.go:584: too many or few RPCs (36) to elect initial leader
+FAIL
+exit status 1
+FAIL	6.5840/raft	1.565s
