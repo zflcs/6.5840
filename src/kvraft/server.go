@@ -245,7 +245,7 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	kv.kvdata = make(map[string]string)
 	kv.seqmap = make(map[int64]int)
 	kv.waitOpCh = make(map[int]chan Op)
-	kv.waitDuration = 1000 * time.Millisecond
+	kv.waitDuration = 500 * time.Millisecond
 	kv.persister = persister
 	kv.readSnapshot(kv.persister.ReadSnapshot())
 	go kv.run()
