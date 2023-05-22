@@ -18,7 +18,7 @@ package shardctrler
 //
 
 // The number of shards.
-const NShards = 10
+const NShards int = 10
 
 // A configuration -- an assignment of shards to groups.
 // Please don't change this.
@@ -36,8 +36,8 @@ type Err string
 
 type JoinArgs struct {
 	Servers map[int][]string // new GID -> servers mappings
-	Cid int64
-	SeqId int
+	Cid     int64
+	SeqId   int
 }
 
 type JoinReply struct {
@@ -46,8 +46,8 @@ type JoinReply struct {
 }
 
 type LeaveArgs struct {
-	GIDs []int
-	Cid int64
+	GIDs  []int
+	Cid   int64
 	SeqId int
 }
 
@@ -59,7 +59,7 @@ type LeaveReply struct {
 type MoveArgs struct {
 	Shard int
 	GID   int
-	Cid int64
+	Cid   int64
 	SeqId int
 }
 
@@ -69,8 +69,8 @@ type MoveReply struct {
 }
 
 type QueryArgs struct {
-	Num int // desired config number
-	Cid int64
+	Num   int // desired config number
+	Cid   int64
 	SeqId int
 }
 

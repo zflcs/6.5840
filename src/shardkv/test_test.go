@@ -113,16 +113,13 @@ func TestJoinLeave(t *testing.T) {
 	for i := 0; i < n; i++ {
 		check(t, ck, ka[i], va[i])
 	}
-
 	cfg.join(1)
-
 	for i := 0; i < n; i++ {
 		check(t, ck, ka[i], va[i])
 		x := randstring(5)
 		ck.Append(ka[i], x)
 		va[i] += x
 	}
-
 	cfg.leave(0)
 
 	for i := 0; i < n; i++ {
@@ -131,7 +128,6 @@ func TestJoinLeave(t *testing.T) {
 		ck.Append(ka[i], x)
 		va[i] += x
 	}
-
 	// allow time for shards to transfer.
 	time.Sleep(1 * time.Second)
 

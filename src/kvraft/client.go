@@ -1,8 +1,12 @@
 package kvraft
 
-import "6.5840/labrpc"
-import "crypto/rand"
-import "math/big"
+import (
+	"crypto/rand"
+	"math/big"
+	"sync"
+
+	"6.5840/labrpc"
+)
 
 
 type Clerk struct {
@@ -11,6 +15,7 @@ type Clerk struct {
 	cid int64
 	nextSeq int
 	prevLeader int
+	mu sync.Mutex
 }
 
 func nrand() int64 {
@@ -24,6 +29,7 @@ func MakeClerk(servers []*labrpc.ClientEnd) *Clerk {
 	ck := new(Clerk)
 	ck.servers = servers
 	// You'll have to add code here.
+	ck.mu = sync.Mutex{}
 	ck.cid = nrand()
 	ck.nextSeq = 1
 	ck.prevLeader = 0
@@ -43,12 +49,14 @@ func MakeClerk(servers []*labrpc.ClientEnd) *Clerk {
 func (ck *Clerk) Get(key string) string {
 
 	// You will have to modify this function.
+	ck.mu.Lock()
 	args := GetArgs{
 		Key: key,
 		Cid: ck.cid,
 		SeqId: ck.nextSeq,
 	}
 	ck.nextSeq ++
+	ck.mu.Unlock()
 	for i := ck.prevLeader; ; i = (i + 1) % len(ck.servers) {	// 总有一个 leader，因此可以退出循环
 		reply := GetReply{}
 		if ck.servers[i].Call("KVServer.Get", &args, &reply) {
@@ -78,6 +86,7 @@ func (ck *Clerk) Get(key string) string {
 // arguments. and reply must be passed as a pointer.
 func (ck *Clerk) PutAppend(key string, value string, op string) {
 	// You will have to modify this function.
+	ck.mu.Lock()
 	args := PutAppendArgs{
 		Key:   key,
 		Value: value,
@@ -86,7 +95,7 @@ func (ck *Clerk) PutAppend(key string, value string, op string) {
 		SeqId: ck.nextSeq,
 	}
 	ck.nextSeq++
-
+	ck.mu.Unlock()
 	for i := ck.prevLeader; ; i = (i + 1) % len(ck.servers) {
 		reply := GetReply{}
 		if ck.servers[i].Call("KVServer.PutAppend", &args, &reply) {
